@@ -522,31 +522,83 @@ class Telebot {
     return true;
   }
 
+  private function getRealClientIp()
+  {
+      $headers = [
+          'HTTP_X_FORWARDED_FOR',
+          'HTTP_X_REAL_IP',
+          'HTTP_CF_CONNECTING_IP',  // Cloudflare
+          'HTTP_X_CLIENT_IP',
+          'HTTP_FORWARDED_FOR',
+          'HTTP_CLIENT_IP',
+      ];
+  
+      foreach ($headers as $header) {
+          if (!empty($_SERVER[$header])) {
+              $list = array_map('trim', explode(',', $_SERVER[$header]));
+              foreach ($list as $ip) {
+                  if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                      return $ip;
+                  }
+              }
+          }
+      }
+  
+      $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+      return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) ? $ip : '0.0.0.0';
+  }
+
   /**
    * Webhook Mode.
    */
-  private function webhook() {
-    $telegram_ip_ranges = [
-      ['lower' => '149.154.160.0', 'upper' => '149.154.175.255'],
-      ['lower' => '91.108.4.0',    'upper' => '91.108.7.255'],
-    ];
-    
-    $ip_dec = (float) sprintf("%u", ip2long($_SERVER['REMOTE_ADDR']));
-    
-    $is_telegram = false;
-    foreach ($telegram_ip_ranges as $telegram_ip_range) if (!$is_telegram) {
-      $lower_dec = (float) sprintf("%u", ip2long($telegram_ip_range['lower']));
-      $upper_dec = (float) sprintf("%u", ip2long($telegram_ip_range['upper']));
-      if ($ip_dec >= $lower_dec and $ip_dec <= $upper_dec) $is_telegram = true;
-    }
-    
-    if ($is_telegram && $_SERVER['REQUEST_METHOD'] == 'POST' && $_SERVER['CONTENT_TYPE'] == 'application/json') {
-      $update = json_decode(file_get_contents('php://input'), true);
+  private function webhook()
+  {
+      $client_ip = $this->getRealClientIp();
+
+      if ($client_ip === '0.0.0.0' || $client_ip === 'unknown') {
+          http_response_code(403);
+          throw new Exception('Invalid client IP');
+      }
+      $telegram_ranges = [
+          ['lower' => '149.154.160.0',  'upper' => '149.154.175.255'],
+          ['lower' => '91.108.4.0',     'upper' => '91.108.7.255'],
+          ['lower' => '91.108.8.0',     'upper' => '91.108.15.255'],
+          ['lower' => '91.108.16.0',    'upper' => '91.108.19.255'],
+          ['lower' => '91.108.56.0',    'upper' => '91.108.59.255'],
+      ];
+
+      $ip_dec = sprintf("%u", ip2long($client_ip));
+      $is_telegram = false;
+
+      foreach ($telegram_ranges as $range) {
+          $lower = sprintf("%u", ip2long($range['lower']));
+          $upper = sprintf("%u", ip2long($range['upper']));
+          if ($ip_dec >= $lower && $ip_dec <= $upper) {
+              $is_telegram = true;
+              break;
+          }
+      }
+
+      if (
+          !$is_telegram
+          || $_SERVER['REQUEST_METHOD'] !== 'POST'
+          || (empty($_SERVER['CONTENT_TYPE']) || stripos($_SERVER['CONTENT_TYPE'], 'application/json') === false)
+          //|| empty($_SERVER['HTTP_USER_AGENT']) || stripos($_SERVER['HTTP_USER_AGENT'], 'Telegram') === false
+      ) {
+          error_log("Blocked webhook attempt from IP: $client_ip | UA: " . ($_SERVER['HTTP_USER_AGENT'] ?? 'none'));
+          http_response_code(403);
+          throw new Exception('Access not allowed!');
+      }
+
+      $input = file_get_contents('php://input');
+      $update = json_decode($input, true);
+
+      if ($update === null || !is_array($update)) {
+          http_response_code(400);
+          throw new Exception('Invalid JSON');
+      }
+
       $this->process($update, false);
-    } else {
-      http_response_code(400);
-      throw new Exception('Access not allowed!');
-    }
   }
 
   /**
